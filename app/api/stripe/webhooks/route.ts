@@ -39,25 +39,12 @@ export async function POST(request: Request) {
       // ── New subscription or one-time purchase ─────────────────────────────
       case "checkout.session.completed": {
         const session = event.data.object as Stripe.Checkout.Session;
-        const userId = session.metadata?.userId;
-        if (!userId) break;
-
-        // Store Stripe customer ID on profile for future portal/checkout calls
-        if (session.customer) {
-          await supabase
-            .from("profiles")
-            .update({ stripe_customer_id: session.customer as string })
-            .eq("id", userId);
-        }
-
-        // If subscription, the subscription.updated event will handle status
-        if (session.mode === "payment") {
-          await supabase.from("purchases").upsert({
-            user_id: userId,
-            stripe_customer_id: session.customer,
-            stripe_session_id: session.id,
-            amount_total: session.amount_total,
-            status: "paid",
+        if (session.subscription) {
+          await supabase.from("subscriptions").insert({
+            stripe_customer_id: session.customer as string,
+            stripe_subscription_id: session.subscription as string,
+            status: "active",
+            plan: "starter",
           });
         }
         break;
@@ -67,18 +54,18 @@ export async function POST(request: Request) {
       case "customer.subscription.updated":
       case "customer.subscription.created": {
         const sub = event.data.object as Stripe.Subscription;
-        const userId = sub.metadata?.userId;
-        if (!userId) break;
-
-        await supabase.from("subscriptions").upsert({
-          id: sub.id,
-          user_id: userId,
+        await supabase.from("subscriptions").insert({
           stripe_customer_id: sub.customer as string,
+          stripe_subscription_id: sub.id,
           status: sub.status,
-          price_id: sub.items.data[0]?.price.id,
+          plan: "starter",
           current_period_end: new Date(sub.current_period_end * 1000).toISOString(),
-          cancel_at_period_end: sub.cancel_at_period_end,
-          updated_at: new Date().toISOString(),
+        });
+        await supabase.from("audit_logs").insert({
+          action: "subscription_updated",
+          entity_type: "subscription",
+          payload_json: { stripe_subscription_id: sub.id, status: sub.status },
+          risk_level: "critical",
         });
         break;
       }
@@ -88,8 +75,8 @@ export async function POST(request: Request) {
         const sub = event.data.object as Stripe.Subscription;
         await supabase
           .from("subscriptions")
-          .update({ status: "canceled", updated_at: new Date().toISOString() })
-          .eq("id", sub.id);
+          .update({ status: "cancelled" })
+          .eq("stripe_subscription_id", sub.id);
         break;
       }
 
